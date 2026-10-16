@@ -1,0 +1,112 @@
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+    - name: verification_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "RID=%REQ(X-REQUEST-ID)% ITER=%REQ(X-VERIFICATION-ITERATION)% METHOD=%REQ(:METHOD)% PATH=%REQ(:PATH)% CODE=%RESPONSE_CODE% FLAGS=%RESPONSE_FLAGS% UPSTREAM=%UPSTREAM_HOST% RECEIVED=%BYTES_RECEIVED% SENT=%BYTES_SENT% DURATION_MS=%DURATION%\n"
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: httpbin
+                      domains:
+                        - "*"
+                      routes:
+                        - match:
+                            prefix: /
+                          route:
+                            cluster: httpbin
+                http_filters:
+                  - name: envoy.filters.http.wasm
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+                      config:
+                        name: ai-token-ratelimit-verification
+                        root_id: ai-token-ratelimit-verification
+                        configuration:
+                          "@type": type.googleapis.com/google.protobuf.StringValue
+                          value: |
+                            {
+                              "rule_name": "ai-token-ip-header-limit",
+                              "rule_items": [
+                                {
+                                  "limit_by_per_ip": "from-header-x-real-ip",
+                                  "limit_keys": [
+                                    {
+                                      "key": "192.168.1.0/24",
+                                      "token_per_minute": 300
+                                    }
+                                  ]
+                                }
+                              ],
+                              "redis": {
+                                "service_name": "redis.static",
+                                "service_port": 6379
+                              },
+                              "rejected_code": 429,
+                              "rejected_msg": "cannot resolve client ip"
+                            }
+                        vm_config:
+                          vm_id: ai-token-ratelimit-verification
+                          runtime: envoy.wasm.runtime.v8
+                          code:
+                            local:
+                              filename: /etc/envoy/main.wasm
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: httpbin
+      connect_timeout: 5s
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: httpbin
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: httpbin
+                      port_value: 8080
+
+    # The plugin resolves its counter through the proxy-wasm Redis host calls.
+    # wasm-go builds the cluster name as `outbound|<port>||<FQDN>` for an
+    # FQDNCluster (pkg/wrapper/cluster_wrapper.go), so the bootstrap cluster has
+    # to carry that exact name - a plain "redis.static" is never looked up and
+    # RedisInit fails with "bad argument".
+    - name: "outbound|6379||redis.static"
+      connect_timeout: 5s
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: "outbound|6379||redis.static"
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: redis
+                      port_value: 6379

@@ -1,0 +1,69 @@
+# Standalone harness for verifying the ai-token-ratelimit per-IP fix.
+#
+# Derived from the repository harness in this directory (compose.yaml +
+# envoy.yaml). It is a separate file rather than an override so the envoy
+# service gets exactly one /etc/envoy/envoy.yaml mount, and so the original
+# harness files stay untouched.
+#
+# Usage (from this directory):
+#   HIGRESS_GATEWAY_IMAGE=... HTTPBIN_IMAGE=... WASM_PATH=... ENVOY_PORT=... \
+#   COMPOSE_PROJECT_NAME=... docker compose -f compose.ai-token-ratelimit-verify.yaml up -d
+services:
+  envoy:
+    image: ${HIGRESS_GATEWAY_IMAGE:?Set a pinned Higress gateway image}
+    entrypoint: /usr/local/bin/envoy
+    command:
+      - -c
+      - /etc/envoy/envoy.yaml
+      - --component-log-level
+      - wasm:debug
+    depends_on:
+      - httpbin
+      - redis
+    init: true
+    restart: "no"
+    networks:
+      - wasmtest
+    ports:
+      - target: 10000
+        published: ${ENVOY_PORT:-10000}
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 9901
+        published: ${ENVOY_ADMIN_PORT:-9901}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ./envoy.ai-token-ratelimit-verify.yaml
+        target: /etc/envoy/envoy.yaml
+        read_only: true
+      - type: bind
+        source: ${WASM_PATH:?Set a repository-relative Wasm path}
+        target: /etc/envoy/main.wasm
+        read_only: true
+
+  httpbin:
+    image: ${HTTPBIN_IMAGE:?Set a pinned httpbin image}
+    init: true
+    restart: "no"
+    networks:
+      - wasmtest
+
+  redis:
+    image: ${REDIS_IMAGE:?Set a pinned redis image}
+    init: true
+    restart: "no"
+    networks:
+      - wasmtest
+
+networks:
+  wasmtest:
+    # Deviation from compose.yaml, recorded in the evidence: the repository
+    # harness sets `internal: true` here. On Docker 29.x an internal network
+    # makes the published ports above unreachable from the host - `docker port`
+    # prints nothing and NetworkSettings.Ports stays `{"10000/tcp":[],...}` -
+    # which breaks the host-side curl that README.md documents. Verified in
+    # isolation: the same `-p 127.0.0.1:18099:80` publishes and serves 200 on a
+    # default bridge network but exposes no binding on an --internal network.
+    driver: bridge
